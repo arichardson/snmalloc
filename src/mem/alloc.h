@@ -542,6 +542,11 @@ namespace snmalloc
 
       handle_message_queue();
 
+      if constexpr (SNMALLOC_PAGEMAP_REDERIVE)
+      {
+        p = page_map.getp(p);
+      }
+
       if (sizeclass < NUM_SMALL_CLASSES)
       {
         Superslab* super = Superslab::get(p);
@@ -580,6 +585,11 @@ namespace snmalloc
       return free(p);
 #else
       handle_message_queue();
+
+      if constexpr (SNMALLOC_PAGEMAP_REDERIVE)
+      {
+        p = page_map.getp(p);
+      }
 
       sizeclass_t sizeclass = size_to_sizeclass(size);
 
@@ -621,6 +631,11 @@ namespace snmalloc
 #else
 
       uint8_t size = pagemap().get(address_cast(p));
+
+      if constexpr (SNMALLOC_PAGEMAP_REDERIVE)
+      {
+        p = page_map.getp(p);
+      }
 
       Superslab* super = Superslab::get(p);
 
@@ -692,6 +707,11 @@ namespace snmalloc
 #else
       uint8_t size = pagemap().get(address_cast(p));
 
+      if constexpr (SNMALLOC_PAGEMAP_REDERIVE)
+      {
+        p = page_map.getp(p);
+      }
+
       Superslab* super = Superslab::get(p);
       if (size == PMSuperslab)
       {
@@ -752,6 +772,11 @@ namespace snmalloc
     {
       // This must be called on an external pointer.
       size_t size = pagemap().get(address_cast(p));
+
+      if constexpr (SNMALLOC_PAGEMAP_REDERIVE)
+      {
+        p = page_map.getp(p);
+      }
 
       if (size == 0)
       {
