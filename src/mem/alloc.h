@@ -448,24 +448,36 @@ namespace snmalloc
 #  endif
 
       constexpr sizeclass_t sizeclass = size_to_sizeclass_const(size);
+      void* ret;
 
       stats().alloc_request(size);
 
       if constexpr (sizeclass < NUM_SMALL_CLASSES)
       {
-        return small_alloc<zero_mem, allow_reserve>(size);
+        constexpr size_t rsize = sizeclass_to_size(sizeclass);
+        ret = small_alloc<zero_mem, allow_reserve>(rsize);
       }
       else if constexpr (sizeclass < NUM_SIZECLASSES)
       {
         handle_message_queue();
         constexpr size_t rsize = sizeclass_to_size(sizeclass);
-        return medium_alloc<zero_mem, allow_reserve>(sizeclass, rsize, size);
+        ret = medium_alloc<zero_mem, allow_reserve>(sizeclass, rsize, size);
       }
       else
       {
-        handle_message_queue();
-        return large_alloc<zero_mem, allow_reserve>(size);
+        ret = large_alloc<zero_mem, allow_reserve>(size);
       }
+
+#  if SNMALLOC_CHERI_SETBOUNDS == 1
+      ret = (ret == NULL) ?
+        ret :
+        cheri_andperm(
+          cheri_csetbounds(ret, size),
+          CHERI_PERMS_USERSPACE_DATA & ~CHERI_PERM_CHERIABI_VMMAP);
+#  endif
+
+      return ret;
+
 #endif
     }
 
@@ -498,7 +510,17 @@ namespace snmalloc
       {
         // Allocations smaller than the slab size are more likely. Improve
         // branch prediction by placing this case first.
-        return small_alloc<zero_mem, allow_reserve>(size);
+        void* ret = small_alloc<zero_mem, allow_reserve>(size);
+
+#  if SNMALLOC_CHERI_SETBOUNDS == 1
+        ret = (ret == NULL) ?
+          ret :
+          cheri_andperm(
+            cheri_csetbounds(ret, size),
+            CHERI_PERMS_USERSPACE_DATA & ~CHERI_PERM_CHERIABI_VMMAP);
+#  endif
+
+        return ret;
       }
 
       return alloc_not_small<zero_mem, allow_reserve>(size);
@@ -507,21 +529,35 @@ namespace snmalloc
     template<ZeroMem zero_mem = NoZero, AllowReserve allow_reserve = YesReserve>
     SNMALLOC_SLOW_PATH ALLOCATOR void* alloc_not_small(size_t size)
     {
+      void* ret;
+
       handle_message_queue();
+
+      sizeclass_t sizeclass = size_to_sizeclass(size);
 
       if (size == 0)
       {
-        return small_alloc<zero_mem, allow_reserve>(1);
+        ret = small_alloc<zero_mem, allow_reserve>(1);
       }
-
-      sizeclass_t sizeclass = size_to_sizeclass(size);
-      if (sizeclass < NUM_SIZECLASSES)
+      else if (sizeclass < NUM_SIZECLASSES)
       {
         size_t rsize = sizeclass_to_size(sizeclass);
-        return medium_alloc<zero_mem, allow_reserve>(sizeclass, rsize, size);
+        ret = medium_alloc<zero_mem, allow_reserve>(sizeclass, rsize, size);
+      }
+      else
+      {
+        ret = large_alloc<zero_mem, allow_reserve>(size);
       }
 
-      return large_alloc<zero_mem, allow_reserve>(size);
+#  if SNMALLOC_CHERI_SETBOUNDS == 1
+      ret = (ret == NULL) ?
+        ret :
+        cheri_andperm(
+          cheri_csetbounds(ret, size),
+          CHERI_PERMS_USERSPACE_DATA & ~CHERI_PERM_CHERIABI_VMMAP);
+#  endif
+
+      return ret;
 
 #endif
     }
