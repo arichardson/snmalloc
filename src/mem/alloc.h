@@ -567,6 +567,7 @@ namespace snmalloc
 #endif
     }
 
+  public:
     /*
      * Free memory of a statically known size. Must be called with an
      * external pointer.
@@ -578,17 +579,27 @@ namespace snmalloc
       UNUSED(size);
       return free(p);
 #else
+      handle_message_queue();
 
+      void* privp = p;
+      if constexpr (SNMALLOC_PAGEMAP_REDERIVE)
+      {
+        privp = page_map.getp(p);
+      }
+
+      dealloc_real<size>(privp);
+#endif
+    }
+
+  private:
+    template<size_t size>
+    void dealloc_real(void* p)
+    {
       constexpr sizeclass_t sizeclass = size_to_sizeclass_const(size);
 
       handle_message_queue();
 
-      if constexpr (SNMALLOC_PAGEMAP_REDERIVE)
-      {
-        p = page_map.getp(p);
-      }
-
-      if (sizeclass < NUM_SMALL_CLASSES)
+      if constexpr (sizeclass < NUM_SMALL_CLASSES)
       {
         Superslab* super = Superslab::get(p);
         RemoteAllocator* target = super->get_allocator();
@@ -598,7 +609,7 @@ namespace snmalloc
         else
           remote_dealloc(target, p, sizeclass);
       }
-      else if (sizeclass < NUM_SIZECLASSES)
+      else if constexpr (sizeclass < NUM_SIZECLASSES)
       {
         Mediumslab* slab = Mediumslab::get(p);
         RemoteAllocator* target = slab->get_allocator();
@@ -612,9 +623,9 @@ namespace snmalloc
       {
         large_dealloc(p, size);
       }
-#endif
     }
 
+  public:
     /*
      * Free memory of a dynamically known size. Must be called with an
      * external pointer.
@@ -627,11 +638,19 @@ namespace snmalloc
 #else
       handle_message_queue();
 
+      void* privp = p;
       if constexpr (SNMALLOC_PAGEMAP_REDERIVE)
       {
-        p = page_map.getp(p);
+        privp = page_map.getp(p);
       }
 
+      dealloc_real(privp, size);
+#endif
+    }
+
+  private:
+    void dealloc_real(void* p, size_t size)
+    {
       sizeclass_t sizeclass = size_to_sizeclass(size);
 
       if (sizeclass < NUM_SMALL_CLASSES)
@@ -658,9 +677,9 @@ namespace snmalloc
       {
         large_dealloc(p, size);
       }
-#endif
     }
 
+  public:
     /*
      * Free memory of an unknown size. Must be called with an external
      * pointer.
@@ -671,12 +690,20 @@ namespace snmalloc
       return free(p);
 #else
 
-      uint8_t size = pagemap().get(address_cast(p));
-
+      void* privp = p;
       if constexpr (SNMALLOC_PAGEMAP_REDERIVE)
       {
-        p = page_map.getp(p);
+        privp = page_map.getp(p);
       }
+
+      dealloc_real(privp);
+#endif
+    }
+
+  private:
+    void dealloc_real(void* p)
+    {
+      uint8_t size = pagemap().get(address_cast(p));
 
       Superslab* super = Superslab::get(p);
 
@@ -728,17 +755,18 @@ namespace snmalloc
         error("Not allocated by this allocator");
       }
 
-#  ifdef CHECK_CLIENT
+#ifdef CHECK_CLIENT
       Superslab* super = Superslab::get(p);
       if (size > 64 || address_cast(super) != address_cast(p))
       {
         error("Not deallocating start of an object");
       }
-#  endif
-      large_dealloc(p, 1ULL << size);
 #endif
+
+      large_dealloc(p, 1ULL << size);
     }
 
+  public:
     template<Boundary location = Start>
     address_t external_address(void* p)
     {
