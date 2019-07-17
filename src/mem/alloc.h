@@ -16,6 +16,18 @@
 #include "sizeclasstable.h"
 #include "slab.h"
 
+#if SNMALLOC_REVOKE_QUARANTINE == 1
+extern "C"
+{
+#  if defined(__CHERI__)
+#    include <cheri/cheric.h>
+#  endif
+#  include <cheri/caprevoke.h>
+#  include <inttypes.h>
+#  include <sys/caprevoke.h>
+}
+#endif
+
 namespace snmalloc
 {
   enum Boundary
@@ -572,15 +584,54 @@ namespace snmalloc
 #  endif
           }
 
+#  if SNMALLOC_REVOKE_QUARANTINE == 1
+
+          uint8_t* revbitmap = nullptr;
+          uint8_t pmsc = a->pagemap().get(address_cast(p));
+
+          assert(pmsc != PMNotOurs);
+
+          if (pmsc == PMSuperslab)
+          {
+            Superslab* super = Superslab::get(widep);
+            revbitmap = super->get_revbitmap();
+          }
+          else if (pmsc == PMMediumslab)
+          {
+            Mediumslab* slab = Mediumslab::get(widep);
+            revbitmap = slab->get_revbitmap();
+          }
+          else
+          {
+            // XXX System call!  Would rather fuse into madvise(), if possible.
+            int res = caprevoke_shadow(
+              CAPREVOKE_SHADOW_NOVMMAP,
+              widep,
+              reinterpret_cast<void**>(&revbitmap));
+            (void) res; /* quiet NDEBUG builds */
+            assert(res == 0);
+          }
+
+          assert(revbitmap != nullptr);
+
+          caprev_shadow_nomap_clear(reinterpret_cast<uint64_t*>(revbitmap), p);
+
+#  endif
+
           a->dealloc_real(widep);
         }
       }
 
       static bool epoch_clears(uint64_t now, uint64_t test)
       {
+#  if SNMALLOC_REVOKE_QUARANTINE == 1
+        return caprevoke_epoch_ge(
+          now, 2 + ((test + 1) & ~static_cast<uint64_t>(1)));
+#  else
         (void)now;
         (void)test;
         return 1;
+#  endif
       }
 
       /*
@@ -628,8 +679,17 @@ namespace snmalloc
         uint64_t epoch;
 
         (void)cause;
+#  if SNMALLOC_REVOKE_QUARANTINE == 1
+        struct caprevoke_stats crst;
+        do
+        {
+          caprevoke(CAPREVOKE_LAST_PASS, waiting.get_head()->full_epoch, &crst);
+        } while (
+          !epoch_clears(crst.epoch_fini, waiting.get_head()->full_epoch));
+        epoch = crst.epoch_fini;
+#  else
         epoch = 4;
-
+#  endif
         assert(n_waiting > 0);
         drain(a, epoch);
       }
@@ -638,12 +698,32 @@ namespace snmalloc
       {
         uint64_t epoch;
 
+#  if SNMALLOC_REVOKE_QUARANTINE == 1
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        {
+          struct caprevoke_stats crst;
+          caprevoke(CAPREVOKE_MUST_ADVANCE | CAPREVOKE_ONLY_IF_OPEN, 0, &crst);
+          filling->full_epoch = crst.epoch_init;
+          epoch = crst.epoch_fini;
+        }
+#  else
         epoch = 4;
+#  endif
 
         filling->first_ptr = filling_left;
         waiting.insert_back(filling);
         filling = nullptr;
         n_waiting++;
+
+#  if SNMALLOC_REVOKE_QUARANTINE == 1
+        /*
+         * This one might be a no-op, if no nodes are sufficiently old.
+         * Do this only if we are revoking, so that we exercise the
+         * multiple node paths on non-revoking platforms.
+         */
+
+        drain(a, epoch);
+#  endif
 
         if ((filling == nullptr) && (n_waiting > 1)) // XXX n_waiting vs. ?
         {
@@ -704,11 +784,29 @@ namespace snmalloc
       {
         struct QuarantineNode* qn = waiting.get_head();
 
+#  if SNMALLOC_REVOKE_QUARANTINE == 1
+        struct caprevoke_stats crst;
+        bool did_revoke = false;
+
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        caprevoke(CAPREVOKE_JUST_THE_TIME, 0, &crst);
+        uint64_t start_epoch = crst.epoch_init;
+#  endif
+
+        /* Drain queue, forcing revocations as we go */
         while (qn != nullptr)
         {
           waiting.pop();
           n_waiting--;
           struct QuarantineNode* qnext = waiting.get_head();
+
+#  if SNMALLOC_REVOKE_QUARANTINE == 1
+          while (!epoch_clears(crst.epoch_fini, qn->full_epoch))
+          {
+            caprevoke(CAPREVOKE_LAST_PASS, qn->full_epoch, &crst);
+            did_revoke = true;
+          }
+#  endif
 
           deqqn(a, qn, qn->first_ptr);
 
@@ -723,6 +821,14 @@ namespace snmalloc
 
         if (filling_left != filling->n_ptrs)
         {
+#  if SNMALLOC_REVOKE_QUARANTINE == 1
+          while (!did_revoke && !epoch_clears(crst.epoch_fini, start_epoch))
+          {
+            caprevoke(
+              CAPREVOKE_LAST_PASS | CAPREVOKE_MUST_ADVANCE, start_epoch, &crst);
+          }
+#  endif
+
           deqqn(a, filling, filling_left);
           filling_left = filling->n_ptrs;
         }
@@ -948,6 +1054,43 @@ namespace snmalloc
       privpred = privp;
 #      endif
 
+#      if SNMALLOC_REVOKE_QUARANTINE == 1
+      constexpr uint8_t sizeclass = size_to_sizeclass_const(size);
+      uint8_t* revbitmap = nullptr;
+      if constexpr (sizeclass < NUM_SMALL_CLASSES)
+      {
+        Superslab* super = Superslab::get(privp);
+        revbitmap = super->get_revbitmap();
+      }
+      else if constexpr (sizeclass < NUM_SIZECLASSES)
+      {
+        Mediumslab* slab = Mediumslab::get(privp);
+        revbitmap = slab->get_revbitmap();
+      }
+      else
+      {
+        // XXX System call!  Would rather fuse into madvise(), if possible.
+        int res = caprevoke_shadow(
+          CAPREVOKE_SHADOW_NOVMMAP,
+          privp,
+          reinterpret_cast<void**>(&revbitmap));
+        (void) res; /* quiet NDEBUG builds */
+        assert(res == 0);
+      }
+
+      /*
+       * Paint the revocation bitmap using the external pointer so that we
+       * correctly fence against concurrent double-free and frees from
+       * earlier revocation epochs.
+       */
+      if (
+        caprev_shadow_nomap_set(
+          reinterpret_cast<uint64_t*>(revbitmap), privpred, p) != 0)
+      {
+        return;
+      }
+#      endif
+
       quarantine.quarantine(this, privpred, p, size);
 #    else
       dealloc_real<size>(privp);
@@ -959,6 +1102,8 @@ namespace snmalloc
     template<size_t size>
     void dealloc_real(void* p)
     {
+      // p is a "high" pointer, not "external"; xref predealloc
+
       constexpr sizeclass_t sizeclass = size_to_sizeclass_const(size);
 
       handle_message_queue();
@@ -1022,11 +1167,48 @@ namespace snmalloc
       privpred = privp;
 #      endif
 
+#      if SNMALLOC_REVOKE_QUARANTINE == 1
+      uint8_t sizeclass = size_to_sizeclass(size);
+      uint8_t* revbitmap = nullptr;
+
+      if (sizeclass < NUM_SMALL_CLASSES)
+      {
+        Superslab* super = Superslab::get(privp);
+        revbitmap = super->get_revbitmap();
+      }
+      else if (sizeclass < NUM_SIZECLASSES)
+      {
+        Mediumslab* slab = Mediumslab::get(privp);
+        revbitmap = slab->get_revbitmap();
+      }
+      else
+      {
+        // XXX System call!  Would rather fuse into madvise(), if possible.
+        int res = caprevoke_shadow(
+          CAPREVOKE_SHADOW_NOVMMAP,
+          privp,
+          reinterpret_cast<void**>(&revbitmap));
+        (void) res; /* quiet NDEBUG builds */
+        assert(res == 0);
+      }
+
+      /*
+       * Paint the revocation bitmap using the external pointer so that we
+       * correctly fence against concurrent double-free and frees from
+       * earlier revocation epochs.
+       */
+      if (
+        caprev_shadow_nomap_set(
+          reinterpret_cast<uint64_t*>(revbitmap), privpred, p) != 0)
+      {
+        return;
+      }
+#      endif
+
       quarantine.quarantine(this, privpred, p, size);
 #    else
       dealloc_real(privp, size);
 #    endif
-
 #  endif
     }
 
@@ -1113,19 +1295,38 @@ namespace snmalloc
         error("Not allocated by this allocator");
       }
 
+#    if SNMALLOC_REVOKE_QUARANTINE == 1
+      uint8_t* revbitmap = nullptr;
+#    endif
+
       if (pmsc == PMSuperslab)
       {
         Superslab* super = Superslab::get(privp);
         size = sizeclass_to_size(super->get_meta(Slab::get(privp)).sizeclass);
+#    if SNMALLOC_REVOKE_QUARANTINE == 1
+        revbitmap = super->get_revbitmap();
+#    endif
       }
       else if (pmsc == PMMediumslab)
       {
         Mediumslab* slab = Mediumslab::get(privp);
         size = sizeclass_to_size(slab->get_sizeclass());
+#    if SNMALLOC_REVOKE_QUARANTINE == 1
+        revbitmap = slab->get_revbitmap();
+#    endif
       }
       else
       {
         size = large_sizeclass_to_size(pmsc - SUPERSLAB_BITS);
+#    if SNMALLOC_REVOKE_QUARANTINE == 1
+        // XXX System call!  Would rather fuse into madvise(), if possible.
+        int res = caprevoke_shadow(
+          CAPREVOKE_SHADOW_NOVMMAP,
+          privp,
+          reinterpret_cast<void**>(&revbitmap));
+        (void) res; /* quiet NDEBUG builds */
+        assert(res == 0);
+#    endif
       }
 
       void* privpred;
@@ -1135,11 +1336,25 @@ namespace snmalloc
       privpred = privp;
 #    endif
 
+#    if SNMALLOC_REVOKE_QUARANTINE == 1
+      assert(revbitmap != nullptr);
+      /*
+       * Paint the revocation bitmap using the external pointer so that we
+       * correctly fence against concurrent double-free and frees from
+       * earlier revocation epochs.
+       */
+      if (
+        caprev_shadow_nomap_set(
+          reinterpret_cast<uint64_t*>(revbitmap), privpred, p) != 0)
+      {
+        return;
+      }
+#    endif
+
       quarantine.quarantine(this, privpred, p, size);
 #  else
       dealloc_real(privp);
 #  endif
-
 #endif
     }
 
@@ -1759,6 +1974,12 @@ namespace snmalloc
         return super;
 
       uint8_t* revbitmap = nullptr;
+#if SNMALLOC_REVOKE_QUARANTINE == 1
+      int res = caprevoke_shadow(
+        CAPREVOKE_SHADOW_NOVMMAP, super, reinterpret_cast<void**>(&revbitmap));
+      (void) res; /* quiet NDEBUG builds */
+      assert(res == 0);
+#endif
 
       super->init(public_state(), revbitmap);
       pagemap().set_slab(super);
@@ -2044,6 +2265,12 @@ namespace snmalloc
           return nullptr;
 
         uint8_t* revbitmap = nullptr;
+#if SNMALLOC_REVOKE_QUARANTINE == 1
+        int res = caprevoke_shadow(
+          CAPREVOKE_SHADOW_NOVMMAP, slab, reinterpret_cast<void**>(&revbitmap));
+        (void) res; /* quiet NDEBUG builds */
+        assert(res == 0);
+#endif
 
         slab->init(public_state(), revbitmap, sizeclass, rsize);
         pagemap().set_slab(slab);

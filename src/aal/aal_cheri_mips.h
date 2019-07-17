@@ -4,7 +4,7 @@
 
 extern "C"
 {
-  #include <machine/cheri.h>
+#include <machine/cheri.h>
 }
 
 namespace snmalloc
@@ -43,7 +43,7 @@ namespace snmalloc
        */
     }
 
-    static inline void prefetch(void *p)
+    static inline void prefetch(void* p)
     {
       __builtin_prefetch(p, 0, 3);
     }
@@ -65,7 +65,6 @@ namespace snmalloc
       halt_out_of_order();
       return t;
     }
-
   };
 
   using AAL_Arch = AAL_CHERI_MIPS;

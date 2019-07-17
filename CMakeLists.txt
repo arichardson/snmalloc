@@ -140,6 +140,10 @@ if(NOT DEFINED SNMALLOC_ONLY_HEADER_LIBRARY)
     target_compile_definitions(${name} PRIVATE "SNMALLOC_EXPORT=__attribute__((visibility(\"default\")))")
     set_target_properties(${name} PROPERTIES CXX_VISIBILITY_PRESET hidden)
 
+    if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "^CHERI")
+      target_link_libraries(${name} cheri_caprevoke)
+    endif()
+
     if(EXPOSE_EXTERNAL_PAGEMAP)
       target_compile_definitions(${name} PRIVATE -DSNMALLOC_EXPOSE_PAGEMAP)
     endif()
@@ -175,6 +179,11 @@ if(NOT DEFINED SNMALLOC_ONLY_HEADER_LIBRARY)
         endif()
         target_include_directories(${TESTNAME} PRIVATE src)
         target_link_libraries(${TESTNAME} snmalloc_lib)
+
+        if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "^CHERI")
+          target_link_libraries(${TESTNAME} cheri_caprevoke)
+        endif()
+
         if (${TEST} MATCHES "release-.*")
           message(STATUS "Adding test: ${TESTNAME} only for release configs")
           add_test(NAME ${TESTNAME} COMMAND ${TESTNAME} CONFIGURATIONS "Release")
