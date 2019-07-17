@@ -45,7 +45,13 @@ namespace snmalloc
 #  define SNMALLOC_REVOKE_QUARANTINE 0
 #endif
 
+
 #if SNMALLOC_REVOKE_QUARANTINE == 1
+
+#  ifndef SNMALLOC_REVOKE_PARANOIA
+#    define SNMALLOC_REVOKE_PARANOIA 0
+#  endif
+
 #  if SNMALLOC_QUARANTINE_DEALLOC == 0
 #    error Revocation depends upon quarantine.
 #  endif

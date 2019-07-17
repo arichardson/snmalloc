@@ -526,6 +526,9 @@ namespace snmalloc
        * and convert on the way in and re-derive on the way to free... For
        * now, leave it as pointers in hopes of getting something off the
        * ground.
+       *
+       * We're also relying on caps for SNMALLOC_REVOKE_PARANOIA, but that
+       * is not necessarily at odds with vaddr_t in general.
        */
     };
 
@@ -552,6 +555,9 @@ namespace snmalloc
         {
           qn->n_ptrs = (sizeclass_to_size(sc) - sizeof(struct QuarantineNode)) /
             sizeof(void*);
+#  if (SNMALLOC_REVOKE_QUARANTINE == 1) && (SNMALLOC_REVOKE_PARANOIA == 1)
+          qn->n_ptrs &= ~1;
+#  endif
         }
 
         return qn;
@@ -615,6 +621,17 @@ namespace snmalloc
           assert(revbitmap != nullptr);
 
           caprev_shadow_nomap_clear(reinterpret_cast<uint64_t*>(revbitmap), p);
+
+#    if SNMALLOC_REVOKE_PARANOIA == 1
+          /*
+           * Every other pointer in the quarantine is a user pointer,
+           * stashed there below.  Verify that we've stripped its tag.
+           */
+          q++;
+          qix++;
+          assert(!cheri_gettag(*q));
+          *q = nullptr;
+#    endif
 
 #  endif
 
@@ -762,9 +779,15 @@ namespace snmalloc
         void** q = reinterpret_cast<void**>(
           pointer_offset(filling, sizeof(struct QuarantineNode)));
 
+#  if (SNMALLOC_REVOKE_QUARANTINE == 1) && (SNMALLOC_REVOKE_PARANOIA == 1)
+        filling_left -= 2;
+        q[filling_left] = privp;
+        q[filling_left + 1] = p;
+#  else
         filling_left--;
         q[filling_left] = privp;
         (void)p;
+#  endif
 
         filling->footprint += psize;
 
