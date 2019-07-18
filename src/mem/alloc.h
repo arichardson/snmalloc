@@ -639,6 +639,43 @@ namespace snmalloc
         }
       }
 
+#  if SNMALLOC_REVOKE_CHATTY == 1
+      void print_revoke_stats(
+        FILE* f,
+        const char* what,
+        Allocator* a,
+        struct caprevoke_stats* crst,
+        uint64_t ccount)
+      {
+#    ifdef __mips__
+        //__asm__ __volatile__("li $0, 0xdead"); // trace off
+#    endif
+        fprintf(
+          f,
+          "revoke: %s"
+          " a=%p"
+          " einit=0x%03" PRIx64 " efini=0x%03" PRIx64 " scand=0x%" PRIx64
+          " pfro=0x%" PRIx64 " pfrw=0x%" PRIx64 " pfsk=0x%" PRIx64
+          " clook=0x%" PRIx64 " cnuke=0x%" PRIx64 " tpage=0x%" PRIx64
+          " tcrev=0x%" PRIx64 "\n",
+          what,
+          a,
+          crst->epoch_init,
+          crst->epoch_fini,
+          crst->pages_scanned,
+          crst->pages_faulted_ro,
+          crst->pages_faulted_rw,
+          crst->pages_fault_skip,
+          crst->caps_found,
+          crst->caps_cleared,
+          crst->page_scan_cycles,
+          ccount);
+#    ifdef __mips__
+        //__asm__ __volatile__("li $0, 0xbeef"); // trace on
+#    endif
+      }
+#  endif
+
       static bool epoch_clears(uint64_t now, uint64_t test)
       {
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
@@ -700,7 +737,14 @@ namespace snmalloc
         struct caprevoke_stats crst;
         do
         {
+#    if SNMALLOC_REVOKE_CHATTY == 1
+          uint64_t cyc_init = AAL::tick();
+#    endif
           caprevoke(CAPREVOKE_LAST_PASS, waiting.get_head()->full_epoch, &crst);
+#    if SNMALLOC_REVOKE_CHATTY == 1
+          uint64_t cyc_fini = AAL::tick();
+          print_revoke_stats(stderr, "stdr", a, &crst, cyc_fini - cyc_init);
+#    endif
         } while (
           !epoch_clears(crst.epoch_fini, waiting.get_head()->full_epoch));
         epoch = crst.epoch_fini;
@@ -719,7 +763,14 @@ namespace snmalloc
         __atomic_thread_fence(__ATOMIC_RELEASE);
         {
           struct caprevoke_stats crst;
+#    if SNMALLOC_REVOKE_CHATTY == 1
+          uint64_t cyc_init = AAL::tick();
+#    endif
           caprevoke(CAPREVOKE_MUST_ADVANCE | CAPREVOKE_ONLY_IF_OPEN, 0, &crst);
+#    if SNMALLOC_REVOKE_CHATTY == 1
+          uint64_t cyc_fini = AAL::tick();
+          print_revoke_stats(stderr, "step", a, &crst, cyc_fini - cyc_init);
+#    endif
           filling->full_epoch = crst.epoch_init;
           epoch = crst.epoch_fini;
         }
@@ -826,7 +877,14 @@ namespace snmalloc
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
           while (!epoch_clears(crst.epoch_fini, qn->full_epoch))
           {
+#    if SNMALLOC_REVOKE_CHATTY == 1
+            uint64_t cyc_init = AAL::tick();
+#    endif
             caprevoke(CAPREVOKE_LAST_PASS, qn->full_epoch, &crst);
+#    if SNMALLOC_REVOKE_CHATTY == 1
+            uint64_t cyc_fini = AAL::tick();
+            print_revoke_stats(stderr, "dbgw", a, &crst, cyc_fini - cyc_init);
+#    endif
             did_revoke = true;
           }
 #  endif
@@ -847,11 +905,17 @@ namespace snmalloc
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
           while (!did_revoke && !epoch_clears(crst.epoch_fini, start_epoch))
           {
+#    if SNMALLOC_REVOKE_CHATTY == 1
+            uint64_t cyc_init = AAL::tick();
+#    endif
             caprevoke(
               CAPREVOKE_LAST_PASS | CAPREVOKE_MUST_ADVANCE, start_epoch, &crst);
+#    if SNMALLOC_REVOKE_CHATTY == 1
+            uint64_t cyc_fini = AAL::tick();
+            print_revoke_stats(stderr, "dbgf", a, &crst, cyc_fini - cyc_init);
+#    endif
           }
 #  endif
-
           deqqn(a, filling, filling_left);
           filling_left = filling->n_ptrs;
         }
