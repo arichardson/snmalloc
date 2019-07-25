@@ -740,7 +740,9 @@ namespace snmalloc
 #    if SNMALLOC_REVOKE_CHATTY == 1
           uint64_t cyc_init = AAL::tick();
 #    endif
+#    if SNMALLOC_REVOKE_DRY_RUN == 0
           caprevoke(CAPREVOKE_LAST_PASS, waiting.get_head()->full_epoch, &crst);
+#    endif
 #    if SNMALLOC_REVOKE_CHATTY == 1
           uint64_t cyc_fini = AAL::tick();
           print_revoke_stats(stderr, "stdr", a, &crst, cyc_fini - cyc_init);
@@ -766,7 +768,9 @@ namespace snmalloc
 #    if SNMALLOC_REVOKE_CHATTY == 1
           uint64_t cyc_init = AAL::tick();
 #    endif
+#    if SNMALLOC_REVOKE_DRY_RUN == 0
           caprevoke(CAPREVOKE_MUST_ADVANCE | CAPREVOKE_ONLY_IF_OPEN, 0, &crst);
+#    endif
 #    if SNMALLOC_REVOKE_CHATTY == 1
           uint64_t cyc_fini = AAL::tick();
           print_revoke_stats(stderr, "step", a, &crst, cyc_fini - cyc_init);
@@ -860,11 +864,17 @@ namespace snmalloc
 
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
         struct caprevoke_stats crst;
+        uint64_t start_epoch;
         bool did_revoke = false;
 
         __atomic_thread_fence(__ATOMIC_RELEASE);
+#    if SNMALLOC_REVOKE_DRY_RUN == 0
         caprevoke(CAPREVOKE_JUST_THE_TIME, 0, &crst);
-        uint64_t start_epoch = crst.epoch_init;
+        start_epoch = crst.epoch_init;
+#    else
+        start_epoch = 0;
+        crst.epoch_fini = 4;
+#    endif
 #  endif
 
         /* Drain queue, forcing revocations as we go */
@@ -880,7 +890,9 @@ namespace snmalloc
 #    if SNMALLOC_REVOKE_CHATTY == 1
             uint64_t cyc_init = AAL::tick();
 #    endif
+#    if SNMALLOC_REVOKE_DRY_RUN == 0
             caprevoke(CAPREVOKE_LAST_PASS, qn->full_epoch, &crst);
+#    endif
 #    if SNMALLOC_REVOKE_CHATTY == 1
             uint64_t cyc_fini = AAL::tick();
             print_revoke_stats(stderr, "dbgw", a, &crst, cyc_fini - cyc_init);
@@ -908,8 +920,10 @@ namespace snmalloc
 #    if SNMALLOC_REVOKE_CHATTY == 1
             uint64_t cyc_init = AAL::tick();
 #    endif
+#    if SNMALLOC_REVOKE_DRY_RUN == 0
             caprevoke(
               CAPREVOKE_LAST_PASS | CAPREVOKE_MUST_ADVANCE, start_epoch, &crst);
+#    endif
 #    if SNMALLOC_REVOKE_CHATTY == 1
             uint64_t cyc_fini = AAL::tick();
             print_revoke_stats(stderr, "dbgf", a, &crst, cyc_fini - cyc_init);
