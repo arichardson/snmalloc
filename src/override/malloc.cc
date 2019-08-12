@@ -76,10 +76,22 @@ extern "C"
         "Calling realloc on pointer that is not to the start of an allocation");
     }
 #endif
-    size_t sz = a->alloc_size(ptr);
+
+    size_t sz;
+#if (SNMALLOC_CHERI_SETBOUNDS == 1)
+    /*
+     * On CHERI, we can just use the length of the capability we've been
+     * given.  While the user might have truncated it, that's their problem.
+     */
+    sz = cheri_getlen(ptr);
+#else
+    sz = a->alloc_size(ptr);
+#endif
+
 #if SNMALLOC_CHERI_ALIGN == 1
     size = bits::align_up(size, 1 << CHERI_ALIGN_SHIFT(size));
 #endif
+
     // Keep the current allocation if the given size is in the same sizeclass.
     if (sz == sizeclass_to_size(size_to_sizeclass(size)))
     {
