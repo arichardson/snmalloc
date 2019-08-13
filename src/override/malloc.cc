@@ -92,8 +92,19 @@ extern "C"
     size = bits::align_up(size, 1 << CHERI_ALIGN_SHIFT(size));
 #endif
 
+    bool hold_still = (sz == sizeclass_to_size(size_to_sizeclass(size)));
+    if constexpr (SNMALLOC_QUARANTINE_DEALLOC == 1)
+    {
+      /*
+       * When quarantining (and, in particular, revoking), we don't permit
+       * holding still, so that we can keep the invariant that only the most
+       * recent allocation has access to the current version of the data.
+       */
+      hold_still = false;
+    }
+
     // Keep the current allocation if the given size is in the same sizeclass.
-    if (sz == sizeclass_to_size(size_to_sizeclass(size)))
+    if (hold_still)
     {
 #if SNMALLOC_CHERI_SETBOUNDS == 1
       /*
