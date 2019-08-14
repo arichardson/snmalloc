@@ -719,7 +719,7 @@ namespace snmalloc
         fprintf(
           f,
           "revoke: %s"
-          " cyccnt=%" PRIx64 " a=%p"
+          " cyccount=0x%" PRIx64 " a=%p"
           " einit=0x%03" PRIx64 " efini=0x%03" PRIx64 " scand=0x%" PRIx64
           " pfro=0x%" PRIx64 " pfrw=0x%" PRIx64 " pfsk=0x%" PRIx64
           " clook=0x%" PRIx64 " cnuke=0x%" PRIx64 " tpage=0x%" PRIx64
@@ -801,7 +801,6 @@ namespace snmalloc
       {
         uint64_t epoch;
 
-        (void)cause;
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
         struct caprevoke_stats crst;
         QuarantineNode* qn = waiting.get_head();
@@ -809,6 +808,11 @@ namespace snmalloc
         {
 #    if SNMALLOC_QUARANTINE_CHATTY == 1
           uint64_t cyc_init = AAL::tick();
+          fprintf(stderr, "revoke: %s begin cyccount=0x%" PRIx64 " a=%p\n",
+                  cause, cyc_init, a);
+          cyc_init = AAL::tick();
+#    else
+        UNUSED(cause);
 #    endif
 #    if SNMALLOC_REVOKE_DRY_RUN == 0
           int res = caprevoke(CAPREVOKE_LAST_PASS, qn->full_epoch, &crst);
@@ -819,11 +823,12 @@ namespace snmalloc
 #    endif
 #    if SNMALLOC_QUARANTINE_CHATTY == 1
           uint64_t cyc_fini = AAL::tick();
-          print_revoke_stats(stderr, "stdr", a, &crst, cyc_init, cyc_fini);
+          print_revoke_stats(stderr, cause, a, &crst, cyc_init, cyc_fini);
 #    endif
         } while (!epoch_clears(crst.epoch_fini, qn->full_epoch));
         epoch = crst.epoch_fini;
 #  else
+        UNUSED(cause);
         epoch = 4;
 #  endif
         assert(n_waiting > 0);
