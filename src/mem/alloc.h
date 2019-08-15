@@ -849,7 +849,10 @@ namespace snmalloc
 #    endif
 #    if SNMALLOC_REVOKE_DRY_RUN == 0
           int res = caprevoke(
-            CAPREVOKE_IGNORE_START | CAPREVOKE_ONLY_IF_OPEN, 0, &crst);
+            CAPREVOKE_IGNORE_START
+            | CAPREVOKE_NO_WAIT_OK
+            | CAPREVOKE_ONLY_IF_OPEN
+            | CAPREVOKE_LAST_PASS, 0, &crst);
           UNUSED(res);
           assert(res == 0);
 #    else
