@@ -622,10 +622,6 @@ namespace snmalloc
           void* privp = q->privp;
           q->privp = nullptr;
 
-#  if defined(__CHERI_PURE_CAPABILITY__)
-          assert(cheri_gettag(privp));
-#  endif
-
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
           uint8_t* revbitmap;
           void* p;
@@ -687,7 +683,7 @@ namespace snmalloc
 
 #    if SNMALLOC_REVOKE_PARANOIA == 1
           /* Verify that the original pointer has had its tag cleared */
-          assert(!cheri_gettag(q->origp));
+          assert(cheri_getperm(q->origp) == 0);
 #    endif
 #  endif
         }
@@ -1803,7 +1799,7 @@ namespace snmalloc
        * which are never decommitted.
        */
 
-      if (!cheri_gettag(p))
+      if (!cheri_gettag(p) || (cheri_getperm(p) == 0))
       {
         return address_cast(static_cast<void*>(nullptr));
       }
