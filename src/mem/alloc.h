@@ -566,6 +566,9 @@ namespace snmalloc
 
       struct QuarantineNode* filling;
       uint16_t filling_left;
+#  if SNMALLOC_REVOKE_QUARANTINE == 1
+      const volatile struct caprevoke_info * cri;
+#  endif
 
       inline bool policy_full()
       {
@@ -836,39 +839,40 @@ namespace snmalloc
       void quarantine_step(Allocator* a)
       {
         uint64_t epoch;
+#  if SNMALLOC_QUARANTINE_CHATTY == 1
+        uint64_t fence_cycles = 0;
+#  endif
 
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
         {
-          struct caprevoke_stats crst;
 #    if SNMALLOC_QUARANTINE_CHATTY == 1
           uint64_t cyc_init = AAL::tick();
 #    endif
 #    if SNMALLOC_REVOKE_DRY_RUN == 0
-          int res = caprevoke(
-            CAPREVOKE_IGNORE_START
-            | CAPREVOKE_NO_WAIT_OK
-            | CAPREVOKE_ONLY_IF_OPEN
-            | CAPREVOKE_LAST_PASS, 0, &crst);
-          UNUSED(res);
-          assert(res == 0);
+          /* Ensure all stores globally visible */
+          std::atomic_thread_fence(std::memory_order_release);
+          /* Read the time without interlocking */
+          filling->full_epoch = cri->epoch_enqueue;
 #    else
-          crst.epoch_init = 0;
-          crst.epoch_fini = 4;
+          filling->full_epoch = 0;
 #    endif
 #    if SNMALLOC_QUARANTINE_CHATTY == 1
           uint64_t cyc_fini = AAL::tick();
-          print_revoke_stats(stderr, "step", a, &crst, cyc_init, cyc_fini);
+          fence_cycles = cyc_fini - cyc_init;
 #    endif
-          filling->full_epoch = crst.epoch_init;
-          epoch = crst.epoch_fini;
+          epoch = cri->epoch_dequeue;
         }
 #  else
         epoch = 4;
 #  endif
 
 #  if SNMALLOC_QUARANTINE_CHATTY == 1
-        fprintf(stderr, "enquar: cyccount=0x%" PRIx64 " a=%p qn=%p foot=0x%zx waiting=0x%zx\n",
-                AAL::tick(), a, filling, filling->footprint, waiting_footprint);
+        fprintf(stderr, "enquar: cyccount=0x%" PRIx64 " a=%p"
+                " fcyc=%" PRIx64
+                " qn=%p foot=0x%zx waiting=0x%zx\n",
+                AAL::tick(), a,
+                fence_cycles,
+                filling, filling->footprint, waiting_footprint);
 #  endif
 
         filling->first_ent = filling_left;
@@ -924,6 +928,13 @@ namespace snmalloc
         assert(filling != nullptr);
 
         filling_left = filling->n_ents;
+#  if SNMALLOC_REVOKE_QUARANTINE == 1
+        void * icri;
+        int res = caprevoke_shadow(CAPREVOKE_SHADOW_INFO_STRUCT, NULL, &icri);
+        UNUSED(res);
+        assert(res == 0);
+        cri = static_cast<const volatile struct caprevoke_info *>(icri);
+#  endif
       }
 
       void quarantine(
@@ -1013,21 +1024,15 @@ namespace snmalloc
         struct QuarantineNode* qn = waiting.get_head();
 
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
-        struct caprevoke_stats crst;
-        uint64_t start_epoch;
+        caprevoke_epoch start_epoch;
+        caprevoke_epoch current_epoch;
 
 #    if SNMALLOC_REVOKE_DRY_RUN == 0
-        int res = caprevoke(
-          CAPREVOKE_NO_WAIT_OK | CAPREVOKE_IGNORE_START |
-            CAPREVOKE_LAST_NO_EARLY,
-          0,
-          &crst);
-        UNUSED(res);
-        assert(res == 0);
-        start_epoch = crst.epoch_init;
+        start_epoch = cri->epoch_enqueue;
+        current_epoch = cri->epoch_dequeue;
 #    else
         start_epoch = 0;
-        crst.epoch_fini = 4;
+        current_epoch = 4;
 #    endif
 #  endif
 
@@ -1039,8 +1044,9 @@ namespace snmalloc
           struct QuarantineNode* qnext = waiting.get_head();
 
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
-          while (!epoch_clears(crst.epoch_fini, qn->full_epoch))
+          while (!epoch_clears(current_epoch, qn->full_epoch))
           {
+            struct caprevoke_stats crst;
 #    if SNMALLOC_QUARANTINE_CHATTY == 1
             uint64_t cyc_init = AAL::tick();
 #    endif
@@ -1048,6 +1054,7 @@ namespace snmalloc
             int res = caprevoke(CAPREVOKE_LAST_PASS, qn->full_epoch, &crst);
             UNUSED(res);
             assert(res == 0);
+            current_epoch = crst.epoch_fini; // XXX: cri->epoch_dequeue
 #    endif
 #    if SNMALLOC_QUARANTINE_CHATTY == 1
             uint64_t cyc_fini = AAL::tick();
@@ -1073,8 +1080,9 @@ namespace snmalloc
         if (filling_left != filling->n_ents)
         {
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
-          while (!epoch_clears(crst.epoch_fini, start_epoch))
+          while (!epoch_clears(current_epoch, start_epoch))
           {
+            struct caprevoke_stats crst;
 #    if SNMALLOC_QUARANTINE_CHATTY == 1
             uint64_t cyc_init = AAL::tick();
 #    endif
@@ -1083,6 +1091,7 @@ namespace snmalloc
               CAPREVOKE_LAST_PASS | CAPREVOKE_IGNORE_START, start_epoch, &crst);
             UNUSED(res);
             assert(res == 0);
+            current_epoch = crst.epoch_fini; // XXX: cri->epoch_dequeue
 #    endif
 #    if SNMALLOC_QUARANTINE_CHATTY == 1
             uint64_t cyc_fini = AAL::tick();
