@@ -607,16 +607,34 @@ namespace snmalloc
         return qn;
       }
 
+#  if SNMALLOC_REVOKE_QUARANTINE == 1
+      // XXX We should do one pass over the quarantine and then one pass to
+      // actually free, because these fences are expensive, nearly doubling
+      // the raw bitmap clearing cost.  On the first pass, we could even
+      // eagerly take things that are "ours", leaving only foreign objects
+      // in the queue to be scattered to the wind.  That probably means we
+      // want to rethink exactly what is being put in the quarantine nodes.
+      static void
+      deqqn_clear(uint8_t* revbitmap, void* p, uint64_t& bitmap_cycles)
+      {
+#    if SNMALLOC_QUARANTINE_CHATTY == 1
+        uint64_t cyc_start = AAL::tick();
+#    endif
+        caprev_shadow_nomap_clear(reinterpret_cast<uint64_t*>(revbitmap), p);
+        std::atomic_thread_fence(std::memory_order_release);
+#    if SNMALLOC_QUARANTINE_CHATTY == 1
+        bitmap_cycles += AAL::tick() - cyc_start;
+#    endif
+      }
+#  endif
+
       static void
       deqqn(Allocator* a, struct QuarantineNode* qn)
       {
         uint16_t qix = qn->first_ent;
         struct QuarantineEntry* q = reinterpret_cast<struct QuarantineEntry*>(
           pointer_offset(qn, sizeof(struct QuarantineNode)));
-#  if (SNMALLOC_REVOKE_QUARANTINE == 1) && (SNMALLOC_QUARANTINE_CHATTY == 1)
         uint64_t bitmap_cycles = 0;
-        uint64_t cyc_start;
-#  endif
 
         q = pointer_offset(q, qix * sizeof(struct QuarantineEntry));
 
@@ -624,11 +642,6 @@ namespace snmalloc
         {
           void* privp = q->privp;
           q->privp = nullptr;
-
-#  if SNMALLOC_REVOKE_QUARANTINE == 1
-          uint8_t* revbitmap;
-          void* p;
-#  endif
 
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
           if (cheri_gettag(q->addl.revbitmap))
@@ -642,8 +655,7 @@ namespace snmalloc
              * precisely those of the large object.
              */
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
-            revbitmap = q->addl.revbitmap;
-            p = privp;
+            deqqn_clear(q->addl.revbitmap, privp, bitmap_cycles);
             a->large_dealloc(privp, cheri_getlen(privp));
 #  else
             a->large_dealloc(
@@ -657,8 +669,9 @@ namespace snmalloc
             Metaslab& meta = super->get_meta(Slab::get(privp));
             sizeclass_t sizeclass = meta.sizeclass;
 
-            revbitmap = super->get_revbitmap();
-            p = cheri_csetboundsexact(privp, sizeclass_to_size(sizeclass));
+            void* p = cheri_csetboundsexact(privp,
+                        sizeclass_to_size(sizeclass));
+            deqqn_clear(super->get_revbitmap(), p, bitmap_cycles);
 #  endif
             a->dealloc_real_small(privp);
           }
@@ -669,25 +682,16 @@ namespace snmalloc
             Mediumslab* slab = Mediumslab::get(privp);
             sizeclass_t sizeclass = slab->get_sizeclass();
 
-            revbitmap = slab->get_revbitmap();
-            p = cheri_csetboundsexact(privp, sizeclass_to_size(sizeclass));
+            void* p = cheri_csetboundsexact(privp,
+                        sizeclass_to_size(sizeclass));
+            deqqn_clear(slab->get_revbitmap(), p, bitmap_cycles);
 #  endif
             a->dealloc_real_medium(privp);
           }
 
-#  if SNMALLOC_REVOKE_QUARANTINE == 1
-#    if SNMALLOC_QUARANTINE_CHATTY == 1
-          cyc_start = AAL::tick();
-#    endif
-          caprev_shadow_nomap_clear(reinterpret_cast<uint64_t*>(revbitmap), p);
-#    if SNMALLOC_QUARANTINE_CHATTY == 1
-          bitmap_cycles += AAL::tick() - cyc_start;
-#    endif
-
-#    if SNMALLOC_REVOKE_PARANOIA == 1
+#  if SNMALLOC_REVOKE_PARANOIA == 1
           /* Verify that the original pointer has had its tag cleared */
           assert(cheri_getperm(q->origp) == 0);
-#    endif
 #  endif
         }
         qn->first_ent = qix;
@@ -699,7 +703,10 @@ namespace snmalloc
 #    else
         fprintf(stderr, "dequar: cyccount=0x%" PRIx64 " a=%p qn=%p foot=0x%zx\n",
           AAL::tick(), a, qn, qn->footprint);
+        UNUSED(bitmap_cycles);
 #    endif
+#  else
+        UNUSED(bitmap_cycles);
 #  endif
       }
 
