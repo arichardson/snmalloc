@@ -34,6 +34,9 @@ namespace snmalloc {
 #  if (SNMALLOC_REVOKE_DRY_RUN == 1)
         "+dry"
 #  endif
+#  if (SNMALLOC_REVOKE_PARANOIA == 1)
+        "+paranoid"
+#  endif
         " "
 #endif
 #if (SNMALLOC_UNSAFE_FREES == 1)
@@ -41,6 +44,10 @@ namespace snmalloc {
 #  if (SNMALLOC_UNSAFE_FREES_CHECK == 1)
         "+check"
 #  endif
+        " "
+#endif
+#ifndef NDEBUG
+        "debug"
 #endif
     "\n";
 
