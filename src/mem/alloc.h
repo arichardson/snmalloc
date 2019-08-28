@@ -17,6 +17,7 @@
 #include "slab.h"
 
 #if SNMALLOC_REVOKE_QUARANTINE == 1
+#include <atomic>
 extern "C"
 {
 #  if defined(__CHERI__)
@@ -608,12 +609,6 @@ namespace snmalloc
       }
 
 #  if SNMALLOC_REVOKE_QUARANTINE == 1
-      // XXX We should do one pass over the quarantine and then one pass to
-      // actually free, because these fences are expensive, nearly doubling
-      // the raw bitmap clearing cost.  On the first pass, we could even
-      // eagerly take things that are "ours", leaving only foreign objects
-      // in the queue to be scattered to the wind.  That probably means we
-      // want to rethink exactly what is being put in the quarantine nodes.
       static void
       deqqn_clear(uint8_t* revbitmap, void* p, uint64_t& bitmap_cycles)
       {
@@ -621,13 +616,26 @@ namespace snmalloc
         uint64_t cyc_start = AAL::tick();
 #    endif
         caprev_shadow_nomap_clear(reinterpret_cast<uint64_t*>(revbitmap), p);
-        std::atomic_thread_fence(std::memory_order_release);
 #    if SNMALLOC_QUARANTINE_CHATTY == 1
         bitmap_cycles += AAL::tick() - cyc_start;
 #    endif
       }
 #  endif
 
+      /* Process a quarantine node back into our own free lists:
+       *
+       *   Large memory is released *after* its shadow in the the revocation
+       *   bitmap has been cleared and we've fenced to prove it.
+       *
+       *   Memory that's ours has its shadow cleared and is immediately
+       *   marked as free in our local slabs; a fence will be coming in the
+       *   *caller*!
+       *
+       *   Memory that's somebody else's has its shadow cleared and is
+       *   queued in our local RemoteCache.  If the remote cache overflows,
+       *   we will fence before routing (see remote_dealloc's slow path).
+       *
+       */
       static void
       deqqn(Allocator* a, struct QuarantineNode* qn)
       {
@@ -685,6 +693,7 @@ namespace snmalloc
             void* p = cheri_csetboundsexact(privp,
                         sizeclass_to_size(sizeclass));
             deqqn_clear(slab->get_revbitmap(), p, bitmap_cycles);
+            std::atomic_thread_fence(std::memory_order_release);
 #  endif
             a->dealloc_real_medium(privp);
           }
@@ -766,6 +775,7 @@ namespace snmalloc
        */
       void drain(Allocator* a, uint64_t epoch)
       {
+        bool diddq = false;
         struct QuarantineNode* qn = waiting.get_head();
         while ((qn != nullptr) && epoch_clears(epoch, qn->full_epoch))
         {
@@ -773,6 +783,7 @@ namespace snmalloc
           waiting_footprint -= qn->footprint;
 
           deqqn(a, qn);
+          diddq = true;
 
           waiting.pop();
           n_waiting--;
@@ -797,6 +808,9 @@ namespace snmalloc
 
           qn = qnext;
         }
+
+        if ((SNMALLOC_REVOKE_QUARANTINE == 1) && diddq)
+          std::atomic_thread_fence(std::memory_order_release);
       }
 
       /*
@@ -857,7 +871,7 @@ namespace snmalloc
 #    endif
 #    if SNMALLOC_REVOKE_DRY_RUN == 0
           /* Ensure all stores globally visible */
-          std::atomic_thread_fence(std::memory_order_release);
+          std::atomic_thread_fence(std::memory_order_acq_rel);
           /* Read the time without interlocking */
           filling->full_epoch = cri->epoch_enqueue;
 #    else
@@ -1124,7 +1138,12 @@ namespace snmalloc
         {
           filling_left = filling->n_ents;
         }
+
+        // For deqqn
+        if constexpr (SNMALLOC_REVOKE_QUARANTINE == 1)
+          std::atomic_thread_fence(std::memory_order_release);
       }
+
     };
 
     QuarantineState quarantine;
@@ -2781,6 +2800,13 @@ namespace snmalloc
         reinterpret_cast<Allocator*>(replacement)->dealloc(p);
         return;
       }
+
+      // If we are doing the revocation thing, we will have zeroed out some
+      // bitmap bits but have not yet made sure those are visible to other
+      // threads.  Since we are about to push our private queues somewhere
+      // else, do so now.
+      if constexpr (SNMALLOC_REVOKE_QUARANTINE == 1)
+        std::atomic_thread_fence(std::memory_order_release);
 
       stats().remote_free(sizeclass);
       remote.dealloc(target->id(), offseted, sizeclass);
