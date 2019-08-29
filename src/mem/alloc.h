@@ -618,6 +618,8 @@ namespace snmalloc
         caprev_shadow_nomap_clear(reinterpret_cast<uint64_t*>(revbitmap), p);
 #    if SNMALLOC_QUARANTINE_CHATTY == 1
         bitmap_cycles += AAL::tick() - cyc_start;
+#    else
+        UNUSED(bitmap_cycles);
 #    endif
       }
 #  endif
